@@ -1,77 +1,160 @@
- 
-
 import pandas as pd
 
-from azure.cosmosdb.table.tableservice import TableService
+import json
+import azure.cosmos.cosmos_client as cosmos_client
+import azure.cosmos.errors as errors
+import azure.cosmos.documents as documents
 
-from azure.cosmosdb.table.models import Entity
-
-import os
-import sys
-import glob
-
-parent_dir = os.path.dirname(__file__)
-sys.path.append(parent_dir)
+import azure.cosmos.http_constants as http_constants
 
 
-table_service = TableService(account_name='xxxx', account_key='xxxx')
-table_name = table_service.create_table("table_name")
+print('Imported packages successfully.')
+
+# Load config file
+with open('config.json') as config_file:
+    config = json.load(config_file)
 
 
-# Python program to read csv files & writing into cosmos db.
+class IDisposable(cosmos_client.CosmosClient):
+    """ A context manager to automatically close an object with a close method
+    in a with statement. """
 
-def read_csvfiles(directoryPath):
-    # reading csv files
-    os.chdir(directoryPath)
-    all_files = glob.glob('*.csv')
-    data =[]
-    for file in all_files:
-        row = pd.read_csv(file,  header=None)
-        data.append(row)
-    print(data)
-    write_cosmosdb(data)
+    def __init__(self, obj):
+        self.obj = obj
 
+    def __enter__(self):
+        return self.obj  # bound to target
 
-
-def write_cosmosdb(table):
-    # table_service = TableService(account_name='xxxx', account_key='xxxx')
-    # table_service.create_table(table - name)
-    index=0
-    for row in table:
-        task = {'PartitionKey': "P"+str(index), 'RowKey':  "R"+str(index+1)}
-        index=index+1
-        for ele in row:
-            task["Row"+str(row.index(ele))]=ele
-        table_service.insert_entity(table_name, task)
+    def __exit__(self, exception_type, exception_val, trace):
+        # extra cleanup in here
+        self.obj = None
 
 
+class ReadCosmos:
 
-# Function for checking if the directory
-# contains file or not
-def isEmpty(directoryPath):
-    # Checking if the directory exists or not
-    if os.path.exists(directoryPath):
+    # Creating the cosmos client
+    def clientinit():
 
-        # Checking if the directory is empty or not
-        if len(os.listdir(directoryPath)) == 0:
-            return "No files found in the directory."
-        else:
-            read_csvfiles(directoryPath)
-    else:
-        return "Directory does not exist !"
+        client = cosmos_client.CosmosClient(url_connection=config["endpoint"], auth={"masterKey": config["primarykey"]})
+        return client
+        print('Client initialized.')
+
+    # creating a Cosmos DB database
+    def create_cosmosdb(client, database_name):
+
+        try:
+            database = client.CreateDatabase({'id': database_name})
+            print('{} database created.'.format(database_name))
+        except errors.HTTPFailure:
+            print("{} already exists".format(database_name))
+
+    # Create a document collection / container
+    def create_container(client, database_name, container_name, partition_key):
+
+        database_link = 'dbs/' + database_name
+        container_definition = {'id': container_name,
+                                'partitionKey':
+                                    {
+                                        'paths': ['/country'],
+                                        'kind': documents.PartitionKind.Hash
+                                    }
+                                }
+        try:
+            container = client.CreateContainer(database_link=database_link,
+                                               collection=container_definition,
+                                               options={'offerThroughput': 400})
+            print('{} Container created'.format(container_name))
+        except errors.HTTPFailure as e:
+            if e.status_code == http_constants.StatusCodes.CONFLICT:
+                container = client.ReadContainer("dbs/" + database['id'] + "/colls/" + container_definition['id'])
+            else:
+                raise e
+
+        # Write data to the container
+
+    def insert_data(client, df, database_name, container_name):
+
+        # Create Connection Link string
+        collection_link = 'dbs/' + database_name + '/colls/' + container_name
+
+        # Write rows of a pandas DataFrame as items to the Database Container
+        for i in range(0, df.shape[0]):
+            # Create dictionary of row being passed to the for loop
+            data_dict = dict(df.iloc[i, :])
+            # Convert that dictionary to json record
+            data_dict = json.dumps(data_dict)
+            # Insert the json record into the Azure Cosmos Db
+            insert_data = client.UpsertItem(collection_link, json.loads(data_dict))
+        print('Records inserted successfully.')
+
+        # Query data from the container
+
+    def query_data(client, database_name, container_name, query):
+        # Initialize list
+        dflist = []
+        # Create Connection Link string
+        collection_link = 'dbs/' + database_name + '/colls/' + container_name
+
+        # For-loop to retrieve individual json records from Cosmos DB
+        # that satisfy our query
+        for item in client.QueryItems(collection_link,
+                                      query,
+                                      {'enableCrossPartitionQuery': True}
+                                      ):
+            # Append each item as a dictionary to list
+            dflist.append(dict(item))
+
+        # Convert list to pandas DataFrame
+        df = pd.DataFrame(dflist)
+        print('Query successful.')
+        return df
+
+
+class ReadCsvFiles:
+
+    def data():
+        # Download and read csv file
+        df = pd.read_csv('file path', encoding='ISO-8859–1',
+                         dtype='str')
+        # Reset index - creates a column called 'index'
+        df = df.reset_index()
+
+        return df
+
+
+database_name = 'HDIdatabase2'
+container_name = 'HDIcontainer2'
+partition_key = 'country'
+query = 'SELECT * FROM c where c.country="Afghanistan" and c.level="National"'
 
 
 def main():
-    print("Hello World!")
-    # Valid directory path
-    directoryPath = "D://softwares/GCP/Flow/ProfDataEngineer/GCPCode/GCP inteview/New folder"
-    isEmpty(directoryPath)
+    with IDisposable(cosmos_client.CosmosClient(url_connection=config["endpoint"],
+                                                auth={"masterKey": config["primarykey"]})) as client:
+
+        try:
+
+            # Creating Database
+            ReadCosmos.create_cosmosdb(client, database_name)
+
+            # Creating Container
+            ReadCosmos.create_container(client, database_name, container_name, partition_key)
+
+            # Reading csv the data
+            df = ReadCsvFiles.data()
+
+            # Inserting the data cosmos db
+            ReadCosmos.insert_data(client, df, database_name, container_name)
+
+            # Querying the data
+            query_data = ReadCosmos.query_data(client, database_name, container_name, query)
+
+        except Exception as e:
+
+            print('You have errors.')
 
 
 if __name__ == "__main__":
     main()
 
  
-
- 
-
