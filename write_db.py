@@ -1,3 +1,6 @@
+# Online Python compiler (interpreter) to run Python online.
+# Write Python 3 code in this online editor and run it.
+print("Hello world")
 import pandas as pd
 
 import json
@@ -108,6 +111,28 @@ class ReadCosmos:
         df = pd.DataFrame(dflist)
         print('Query successful.')
         return df
+    
+    # Query data from the container
+
+    def delete_data(client, database_name, container_name, query,deviceid):
+        
+         #fetch items
+        query = f"SELECT * FROM c WHERE c.device.deviceid IN ('{deviceid}')"
+        items = list(container.query_items(query=query, enable_cross_partition_query=False))
+        for item in items:
+            container.delete_item(item, 'partition-key')
+        
+    def update_data(client, database_name, container_name, query):
+        
+        document_link = "dbs/" + COSMOS_DB_DATABASE_ID + "/colls/" + COSMOS_DB_COLLECTION_ID
+        for item in client.QueryItems(document_link,
+                                  'SELECT * FROM ' + COSMOS_DB_COLLECTION_ID,
+                                  {'enableCrossPartitionQuery': True}):
+                                      item['created'] += '123'
+                                      print(json.dumps(item, indent=True))
+                                      client.ReplaceItem(document_link, item, options=None)
+        
+
 
 
 class ReadCsvFiles:
@@ -148,6 +173,13 @@ def main():
 
             # Querying the data
             query_data = ReadCosmos.query_data(client, database_name, container_name, query)
+            
+            # deleting the data
+            query_data = ReadCosmos.query_data(client, database_name, container_name, query)
+
+	    # update the data
+            query_data = ReadCosmos.query_data(client, database_name, container_name, query)
+            
 
         except Exception as e:
 
