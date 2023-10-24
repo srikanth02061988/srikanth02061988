@@ -1,4 +1,4 @@
-[9:23 pm, 23/10/2023] Kishore Xpand IT: import os
+import os
 import json
 import azure.functions as func
 from azure.cosmos import CosmosClient, PartitionKey
