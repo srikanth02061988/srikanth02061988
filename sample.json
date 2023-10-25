@@ -1,0 +1,67 @@
+[
+    {
+        "id": "1",
+        "app_code": "sample_app",
+        "sft_batch_file_name": "batch123",
+        "data_time_stamp": "2021-09-14T12:34:56Z",
+        "complete_directory_structure": "/path/to/directory",
+        "partitionKey": "sample_app"
+    },
+    {
+        "id": "2",
+        "app_code": "sample_app2",
+        "sft_batch_file_name": "batch2",
+        "data_time_stamp": "2021-09-14T12:34:56Z",
+        "complete_directory_structure": "/path/to/directory",
+        "partitionKey": "sample_app"
+    },
+    {
+        "id": "3",
+        "app_code": "sample_app3",
+        "sft_batch_file_name": "batch3",
+        "data_time_stamp": "2021-09-14T12:34:56Z",
+        "complete_directory_structure": "/path/to/directory",
+        "partitionKey": "sample_app"
+    },
+    {
+        "id": "4",
+        "app_code": "sample_app4",
+        "sft_batch_file_name": "batch4",
+        "data_time_stamp": "2021-09-14T12:34:56Z",
+        "complete_directory_structure": "/path/to/directory",
+        "partitionKey": "sample_app"
+    },
+    {
+        "id": "5",
+        "app_code": "sample_app5",
+        "sft_batch_file_name": "batch5",
+        "data_time_stamp": "2021-09-14T12:34:56Z",
+        "complete_directory_structure": "/path/to/directory",
+        "partitionKey": "sample_app"
+    },
+    {
+        "id": "6",
+        "app_code": "sample_app6",
+        "sft_batch_file_name": "batch6",
+        "data_time_stamp": "2021-09-14T12:34:56Z",
+        "complete_directory_structure": "/path/to/directory",
+        "partitionKey": "sample_app"
+    },
+    {
+        "id": "7",
+        "app_code": "sample_app7",
+        "sft_batch_file_name": "batch7",
+        "data_time_stamp": "2021-09-14T12:34:56Z",
+        "complete_directory_structure": "/path/to/directory",
+        "partitionKey": "sample_app"
+    },
+	{
+        "id": "8",
+        "app_code": "sample_app8",
+        "sft_batch_file_name": "batch8",
+        "data_time_stamp": "2021-09-14T12:34:56Z",
+        "complete_directory_structure": "/path/to/directory",
+        "partitionKey": "sample_app"
+    }
+    
+]
