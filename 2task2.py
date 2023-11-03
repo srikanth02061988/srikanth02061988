@@ -25,3 +25,41 @@ create_databricks_job = PythonOperator(
 
 if __name__ == "__main__":
     dag.cli()
+
+
+import subprocess
+import json
+
+# Define job configuration
+job_name = "MyJobName"
+jar_path = "/path/to/your/spark-job.jar"
+main_class = "com.example.YourMainClass"
+file_path = "/path/to/your/inputfile.txt"
+folder_path = "/path/to/your/outputfolder/"
+notebook_path = "/Users/your_username/your_notebook"
+cluster_id = "cluster_id"
+
+# Define arguments, including both file path and folder path
+args = [file_path, folder_path]
+
+job_config = {
+    "new_cluster": {
+        "spark_version": "7.3.x",
+        "node_type_id": "Standard_DS3_v2",
+        "num_workers": 2,
+    },
+    "spark_jar_task": {
+        "main_class_name": main_class,
+        "parameters": args,
+        "jar_uri": jar_path,
+    },
+}
+
+# Create the Databricks job
+job_create_command = f"databricks jobs create --name {job_name} --json '{json.dumps(job_config)}'"
+
+try:
+    subprocess.run(job_create_command, shell=True, check=True)
+    print(f"Job '{job_name}' created successfully.")
+except subprocess.CalledProcessError as e:
+    print(f"Error creating job: {e}")
