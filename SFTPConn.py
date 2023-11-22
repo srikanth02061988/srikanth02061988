@@ -54,3 +54,58 @@ def upload_file_and_log(file_path):
 # Example usage
 file_to_upload = 'file path location path'
 upload_file_and_log(file_to_upload)
+
+
+
+import paramiko
+import os
+from datetime import datetime
+
+# Azure VM (SFTP server) credentials
+sftp_host = 'your_azure_vm_ip'
+sftp_port = 22
+sftp_username = 'your_sftp_username'
+sftp_password = 'your_sftp_password'
+sftp_remote_path = 'your vm login'
+
+# Log file details
+log_file_path = 'upload_log.txt'
+
+def log_upload_details(username, filename, file_size):
+    # Log the details to a file
+    with open(log_file_path, 'a') as log_file:
+        log_file.write(f"{datetime.now().isoformat()} - User: {username}, File: {filename}, Size: {file_size} bytes\n")
+
+def sftp_upload_file(username, local_file_path):
+    try:
+        # Connect to SFTP server
+        transport = paramiko.Transport((sftp_host, sftp_port))
+        transport.connect(username=sftp_username, password=sftp_password)
+        sftp = paramiko.SFTPClient.from_transport(transport)
+
+        # Upload the file
+        remote_file_path = sftp_remote_path + os.path.basename(local_file_path)
+        sftp.put(local_file_path, remote_file_path)
+
+        # Get file details
+        file_size = sftp.stat(remote_file_path).st_size
+        filename = os.path.basename(local_file_path)
+
+        # Log the upload details
+        log_upload_details(username, filename, file_size)
+
+        print(f"File '{filename}' uploaded successfully by user '{username}'.")
+    except Exception as e:
+        print(f"Error: {e}")
+    finally:
+        # Close the SFTP connection
+        if sftp:
+            sftp.close()
+        if transport:
+            transport.close()
+
+# Example usage
+file_to_upload = 'path/to/your/file.txt'
+uploading_user = 'your_azure_vm_sftp_username'
+sftp_upload_file(uploading_user, file_to_upload)
+
