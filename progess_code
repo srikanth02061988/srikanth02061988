@@ -1,0 +1,62 @@
+import subprocess
+import sys
+import json
+import psycopg2 import sql
+
+#global variable declaration for constant values
+host_name = 'npe'
+database_name =''
+user_name =''
+password = ''
+port_no = ''
+meta_tbl=''
+workflow_database = "None"
+workflow_container =""
+job_name ="None"
+last_load_timestamp = 170
+
+def connect_to_database(dbname):
+    try:
+        connection = psycopg2.connect(database=dbname, user=user_name,password=password,
+                                      host=host_name,port=port_no)
+        return  connection
+    except psycopg2.Error as e:
+        print(f"unable to connect to the database, Error: {e}")
+        return None
+
+def retrieve_metadata(connection, meta_tbl):
+    global workflow_database
+    global workflow_container
+    global last_load_timestamp
+    global job_name
+    uniqueid = ""
+    try:
+        cursor=connection.cursor()
+
+        # sql query to selecting meta table data
+        query = sql.SQL("SELECT json_data from {} ORDER BY id ASC ").format(
+            sql.Identifier(meta_tbl)
+        )
+        cursor.execute(query)
+
+        # fetching all rows
+        rows = cursor.fetchall()
+        print(rows)
+
+        for row in rows:
+            print(row)
+            jar_path = row['jar_path']
+            main_class = row['main_class']
+            databrciksMode = row['databricksMode']
+            cosmosConfName = row['cosmosConfName']
+            secretScope = row
+
+
+if __name__ == "__main__":
+    # connecting to the postgreSQL database
+    connection = connect_to_database(database_name)
+
+    if connection:
+        # Retrieving the constant table data
+        retrieve_metadata(connection,meta_tbl)
+
