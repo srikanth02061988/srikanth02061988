@@ -3,6 +3,12 @@ import sys
 import json
 import psycopg2 import sql
 
+CREATE TABLE your_table (
+    id SERIAL PRIMARY KEY,
+    data_column VARCHAR(255),
+    timestamp_column TIMESTAMP DEFAULT current_timestamp
+);
+
 #global variable declaration for constant values
 host_name = 'npe'
 database_name =''
@@ -49,7 +55,58 @@ def retrieve_metadata(connection, meta_tbl):
             main_class = row['main_class']
             databrciksMode = row['databricksMode']
             cosmosConfName = row['cosmosConfName']
-            secretScope = row
+            secretScope = row['secretScope']
+            existing_cluster_id = row['existing_cluster_id']
+
+            print(jar_path)
+
+            # selecting config database of param information database
+            database =  connect_to_database(config_db)
+            print(database)
+
+            # selecting meta data information
+            metadb = connect_to_database(metadata_database)
+
+            # selecting config data container
+
+
+            metadb = connect_to_database(meta_db)
+
+            # selecting cofig data container
+            container =
+
+            # Function to get the last processed timestamp
+            last_load_timestamp = get_last_processed_timesamp(metadb, timestamp_container)
+            print("last_load_timestamp:", last_load_timestamp)
+
+            data_items = get_uniqueid_info(last_load_timestamp, metadb, config_meta_container)
+            print("The unique data", data_items)
+
+            # Iterate over each uniqueID in db table code
+
+
+            update_last_processed_timestamp(update_timestamp, metadb,timestamp_container)
+
+def get_uniqueid_info(last_load_timestamp, metadb, config_meta_container):
+    # selecting meta data information in meta table
+
+    try:
+        cursor=metadb.cursor()
+
+        # sql query to selecting meta table data
+        query = sql.SQL("SELECT json_data from {} ORDER BY id ASC ").format(
+            sql.Identifier(meta_tbl)
+        )
+        cursor.execute(query)
+
+        # fetching all rows
+        rows = cursor.fetchall()
+        print(rows)
+
+        for row in rows:
+            print(row)
+
+
 
 
 if __name__ == "__main__":
