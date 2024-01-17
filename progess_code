@@ -3,12 +3,6 @@ import sys
 import json
 import psycopg2 import sql
 
-CREATE TABLE your_table (
-    id SERIAL PRIMARY KEY,
-    data_column VARCHAR(255),
-    timestamp_column TIMESTAMP DEFAULT current_timestamp
-);
-
 #global variable declaration for constant values
 host_name = 'npe'
 database_name =''
@@ -83,9 +77,72 @@ def retrieve_metadata(connection, meta_tbl):
             print("The unique data", data_items)
 
             # Iterate over each uniqueID in db table code
-
-
             update_last_processed_timestamp(update_timestamp, metadb,timestamp_container)
+
+            for ids in data_items:
+                update_timestamp = ids[1]
+                # Creating new cursor for each uid iteration
+                with database.cursor() as cursor:
+                    # SQL query
+                    query = sql.SQL("SELECT json_data FROM {} WHERE uid LIKE {}").format(
+                        sql.Identifier(timestamp_container),
+                        sql.Literal(uniqueid + '%')
+                    )
+                    print(query)
+                    cursor.execute(query)
+                    # Fetching all rows
+                    rows = cursor.fetchall()
+                    print(rows)
+                    for row in rows:
+                        json_data = row['json_data']
+                        # accessing key and value from the bronze data
+                        if 'bronze' in json_data:
+                            bronze_values = json_data['bronze']
+                            print("Bronze Values:", bronze_values)
+                            for items in bronze_values:
+                                job_name = items['workflowName']
+                                taskFilePath = items['filename']
+                                configFolder = items['filePath']
+                                args = ["databricksMode={}".format(databrciksMode),
+                                        "cosmosConfName={}".format(cosmosConfName),
+                                        "secretScope={}".format(secretScope),
+                                        "taskFilePath={}".format(taskFilePath),
+                                        "configFolder={}".format(configFolder)]
+                                # calling job_schedule_config function
+                                job_schedule_config(existing_cluster_id,main_class,args,jar_path,
+                                                    bronze_schedule, timezone)
+
+
+                        if 'silder' in json_data:
+                            silver_values = json_data['silver']
+                            print("silver_values", silver_values)
+
+
+            # the cursor is closing
+            cursor.close()
+
+
+def job_schedule_config(existing_cluster_id,main_class,args,jar_path,bronze_schedule, timezone):
+    print("the jobname", job_name)
+    job_config = {
+        "name": job_name,
+        "existing_cluster_id": existing_cluster_id,
+        "spark_jar_task": {
+            "main_class_name": main_class,
+            "parameters": args,
+            "jar_url": jar_path
+        },
+        "schedule": {
+            "quartz_cron_expression": job_schedule,
+            "timezone_id": timezone
+        }
+    }
+    create_and_run_databricks_job(job_config)
+
+def create_and_run_databricks_job(job_info):
+    config_data_json = json.dumps(job_info)
+
+
 
 def get_uniqueid_info(last_load_timestamp, metadb, config_meta_container):
     # selecting meta data information in meta table
