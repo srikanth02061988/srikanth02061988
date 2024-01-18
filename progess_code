@@ -163,6 +163,34 @@ def get_uniqueid_info(last_load_timestamp, metadb, config_meta_container):
         for row in rows:
             print(row)
 
+def update_last_processed_timestamp(update_timestamp, database, timestamp_container):
+    # connect to the timestamp database
+    timestamp_db = connect_to_database(database)
+    try:
+        with timestamp_db.cursor() as cursor:
+            # query to fetching latest timestamp table
+            query_select = f"SELECT * FROM {timestamp_container}"
+            cursor.execute(query_select)
+            rows = cursor.fetchall()
+
+            if rows:
+                for row in rows:
+                    # updating the existing row
+                    query_update = f"UPDATE {timestamp_container} SET latest_timestamp = %s WHERE id = %s"
+                    cursor.execute(query_update, (update_timestamp, row['id']))
+                    print("The latest timestamp updated in DB")
+            else:
+                # creating a new row if it doesn't exist
+                query_insert = f"INSERT INTO {timestamp_container} (id, latest_timestamp) VALUES (%s, %s)"
+                cursor.execute(query_insert, ('uniquid_document_id', update_timestamp))
+                print("A new row with the latest timestamp has been inserted into DB")
+
+        # committing the changes
+        timestamp_db.commit()
+
+    finally:
+        # db connection close
+        timestamp_db.close()
 
 
 
