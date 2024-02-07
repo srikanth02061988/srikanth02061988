@@ -171,3 +171,86 @@ def insert_data_into_postdb(job_id, job_name, uid, blob_path, task_name):
         print(f"Item with job_id {job_id}, Job name {job_name} inserted successfully")
     except psycopg2.Error as e:
         print(f"Error inserting new JSON data into the table. Error: {e}")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def create_and_run_databricks_job(job_info, task_name, uid, blob_path, job_name):
+    host_url = None
+    pat_token = None
+    try:
+        # connecting to the Databricks for retrieving token
+        databricks_secret = connect_to_keyvault(key_vault_name, databricks_secret_name)
+        if databricks_secret:
+            host_url, pat_token = databricks_secret.split(',')
+
+        # Converting the config_data_json dictionary to a JSON string
+        config_data_json = json.dumps(job_info)
+        print("config_data_json", config_data_json)
+
+        config_data_json = config_data_json.replace("'", '"').replace('"[{', "[").replace('}]"', "]")
+        print("args info", config_data_json)
+
+        job_id = read_databricks_job(job_name, uid)
+
+        headers = {
+            'Authorization': f'Bearer {pat_token}',
+            'Content-Type': 'application/json',
+        }
+
+        if job_id:
+            # updating the existing job details
+            print("job_id:", job_id, type(job_id))
+            update_job_url = f'{host_url}/api/2.0/jobs/reset'
+            update_job_payload = {
+                'job_id': job_id,
+                'new_settings': json.loads(config_data_json)
+            }
+            print("running update job URL:", update_job_url)
+
+            response = requests.post(update_job_url, headers=headers, json=update_job_payload)
+            response.raise_for_status()
+            response_json = response.json()
+
+            if 'error_code' in response_json:
+                raise Exception(f"Error updating the job: {response_json['error_code']}: {response_json['message']}")
+
+            print("The Job details updated successfully.")
+            # Updating the job_id details in the database
+            insert_data_into_postdb(job_id, job_name, uid, blob_path, task_name)
+        else:
+            create_job_url = f'{host_url}/api/2.0/jobs/create'
+            create_job_payload = {
+                'name': job_name,
+                'new_settings': json.loads(config_data_json)
+            }
+
+            response = requests.post(create_job_url, headers=headers, json=create_job_payload)
+            response.raise_for_status()  # Raise an exception for HTTP errors
+            response_json = response.json()
+
+            if 'error_code' in response_json:
+                raise Exception(f"Error creating job: {response_json['error_code']}: {response_json['message']}")
+
+            job_id = response_json["job_id"]
+
+            # Insert or update the job_id in the database
+            insert_data_into_postdb(job_id, job_name, uid, blob_path, task_name)
+
+
+
+
+
