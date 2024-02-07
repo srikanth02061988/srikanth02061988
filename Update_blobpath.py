@@ -239,7 +239,7 @@ def create_and_run_databricks_job(job_info, task_name, uid, blob_path, job_name)
             }
 
             response = requests.post(create_job_url, headers=headers, json=create_job_payload)
-            response.raise_for_status()  # Raise an exception for HTTP errors
+            response.raise_for_status()
             response_json = response.json()
 
             if 'error_code' in response_json:
