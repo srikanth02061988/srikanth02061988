@@ -1,0 +1,375 @@
+package com.statestr.eff.spark.client;
+
+import com.jayway.jsonpath.JsonPath;
+import com.jayway.jsonpath.PathNotFoundException;
+import com.microsoft.azure.functions.ExecutionContext;
+import com.microsoft.azure.functions.annotation.*;
+import com.microsoft.azure.storage.CloudStorageAccount;
+import com.microsoft.azure.storage.blob.CloudBlobClient;
+import com.microsoft.azure.storage.blob.CloudBlockBlob;
+import com.statestr.eff.util.DatabricksUtil;
+import com.statestr.eff.util.PGDbConnection;
+import org.apache.commons.lang3.StringEscapeUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.json.JSONObject;
+import org.json.JSONArray;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+
+import java.sql.SQLException;
+
+import java.text.SimpleDateFormat;
+import java.time.OffsetDateTime;
+import java.util.*;
+import java.net.URI;
+import java.net.URLEncoder;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.util.logging.ConsoleHandler;
+import java.util.logging.Logger;
+import java.util.regex.Pattern;
+import java.util.Date;
+
+
+public class BlobStorageTriggerFunction {
+    private static final Logger LOGGER = Logger.getLogger(
+            BlobStorageTriggerFunction.class.getName());
+    private static final Pattern EXTENSION_PATTERN = Pattern.compile("\\.[^/]+$");
+    private static final String http_prefix = "https:";
+    private static final String abfs_prefix = "abfs:";
+
+    private static final String containerName = System.getenv("AZURE_STORAGE_CONTAINER");
+    private static final String AzureWJStorage = System.getenv("AzureWebJobsStorage");
+
+    static {
+        Logger mainLogger = Logger.getLogger("com.statestr.eff.spark");
+        ConsoleHandler handler = new ConsoleHandler();
+        System.out.print(" AzureWebJobsStorage : " + AzureWJStorage);
+    }
+
+
+    @FunctionName("BlobStorageTriggerFunction-EFF")
+    @StorageAccount("AzureWebJobsStorage")
+    public void run(
+            @BlobTrigger(name = "blob", path = "$AZURE_STORAGE_CONTAINER%/{blobname}", connection = "AzureWebJobsStorage") String blob,
+            @BindingName("blobname") String filepath,
+            final ExecutionContext context
+    ) {
+        try {
+            if (StringUtils.isEmpty(filepath)) {
+                throw new Exception("Empty Payload");
+            }
+            String storageAccountName;
+            CloudStorageAccount storageAccount = CloudStorageAccount.parse(System.getenv("AzureWebJobsStorage"));
+            storageAccountName = storageAccount.getCredentials().getAccountName();
+            CloudBlobClient blobClient = storageAccount.createCloudBlobClient();
+            CloudBlockBlob blockBlob = blobClient.getContainerReference(containerName).getBlockBlobReference(filepath);
+            blockBlob.downloadAttributes();
+            Date lastModified = blockBlob.getProperties().getLastModified();
+            var dateString = "";
+            if (lastModified != null) {
+                // Replace with your actual condition
+                //long 1md_timestamp = lastModified.getTime();
+                SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'");
+                sdf.setTimeZone(TimeZone.getTimeZone("UTC"));
+                //convert to string
+                dateString = sdf.format(lastModified);
+                //LOGGER.info (filepath +":----: lastModified :----: " + dateString);
+                //if (lastModified.before (new Date())) {
+                if (lastModified.before(new Date(System.currentTimeMillis() - 120000))) {
+                    ;
+                    LOGGER.info("Skipping blob: " + filepath + ":---: lastModified: " + lastModified.toString());
+                    return;
+                }
+            } else {
+                LOGGER.info("Could not get lastModified: " + filepath + ":---: lastModified: " + lastModified.toString());
+            }
+
+            var eventTime = "";
+            if (StringUtils.isEmpty(dateString)) {
+                eventTime = OffsetDateTime.now().toString();
+
+            } else {
+                eventTime = dateString;
+            }
+            String blobUrl = String.format("https://%s.blob.core.windows.net/%s/%s", storageAccountName, containerName, filepath);
+            String eventType = "Blob Created";
+            String dirs = parseBlbDir(blobUrl);
+            String fileName = GetFileName(blobUrl);
+            String evtName = "FeedInProgress-" + fileName;
+            String eventKey = blobUrl;
+
+            // Create a JSON object with the blob details
+            JSONObject blobDetailsJson = new JSONObject();
+            JSONObject data = new JSONObject();
+            data.put("eventType", eventType);
+            data.put("blobContainer", containerName);
+            data.put("blobDirectories", dirs);
+            data.put("filepath", filepath);
+            data.put("fileName", fileName);
+            data.put("eventKey", eventKey);
+            data.put("eventTime", eventTime);
+            blobDetailsJson.put("partKey", evtName + "-" + eventTime);
+            blobDetailsJson.put("data", data);
+
+            //Print Blob Event_Data
+            LOGGER.info("Blob Event data: " + blobDetailsJson.toString());
+
+            //Get PG Connection Scripts
+            String PGCS_DBW = System.getenv("EFF_PGSQL_SA_CS");
+            String appCode = "sow";
+
+            // SQL query
+            //String query = "select json_data:: text as json from public.workflow jobinfo where json_data:: text LIKE ? order by id desc limit 1";
+            String query = "select json_data:: text as json, uniqueid, jobid from " + appCode + "_metadata.workflow_jobinfo where json_data:: text LIKE ? order by id desc limit 1";
+            PGDbConnection dbConn_DBW = new PGDbConnection(PGCS_DBW);
+            List<String> eventMappingDetails = new ArrayList<>();
+            var UnqJobID = "";
+            var Job_ID = "";
+            try (Connection con = dbConn_DBW.getConnection();
+                 PreparedStatement pst = con.prepareStatement((query))) {
+                pst.setString(1, "%" + dirs + "%");
+                ResultSet rs = pst.executeQuery();
+                while (rs.next()) {
+                    eventMappingDetails.add(rs.getString("json"));
+                    UnqJobID = rs.getString("uniqueid");
+                    Job_ID = rs.getString("jobid");
+                }
+            } catch (SQLException ex) {
+                context.getLogger().info("Failed to connect to the database or execute the query.");
+                context.getLogger().info(ex.getMessage());
+            } finally {
+                try {
+                    if (dbConn_DBW != null && !dbConn_DBW.getConnection().isClosed()) {
+                        dbconn_DBW.getConnection().close();
+                    }
+                } catch (SQLException e) {
+                    e.printStackTrace();
+                }
+            }
+
+            if (StringUtils.isEmpty(Job_ID)) {
+                Job_ID = "999999999";
+                UnqJobID = "zzzzzzzzzz";
+                LOGGER.info("Skipping blob for:" + filepath + " :--:" + eventMappingDetails.toString() + ":: UID :---:" + UnqJobID + ":--:JID:--:" + Job_ID);
+                return;
+            }
+            LOGGER.info("Query eventMapping Details:--:" + eventMappingDetails.toString() + ":---: UID :---:" + UnqJobID + ":---: JID :---:" + Job_ID);
+            blobDetailsJson.put("job_id", Job_ID);
+
+            for (String s : eventMappingDetails) {
+                String blob_path = JsonPath.read(s, "blob_path");
+                String job_name = JsonPath.read(s, "jobname");
+
+                String blbdirs = parseBlbDir(blob_path);
+                LOGGER.info("Getting Metadata blob_dirs: " + blbdirs);
+
+                //Setup DB Parameters
+                Map<String, Object> databricks = getMap(s, "databricks");
+                //LOGGER.info("Query databricks :"+new JSONObject (databricks));
+                if (blbdirs.equalsIgnoreCase(dirs)) {
+                    LOGGER.info(" Triggering Databricks Job inside ::  " + UnqJobID + ":-:" + blbdirs + ":-:" + evtName);
+                    //trigger job
+
+                    String run_id = triggerDBJob(databricks, blobDetailsJson);
+                    blobDetailsJson.put("job_run_id", run_id);
+                    blobDetailsJson.put("job_name", job_name);
+                }
+            }
+            String cdbOut = blobDetailsJson.toString();
+
+            //SQL query
+            String Insert_query = "INSERT INTO datafabric_logging.event_log (jobid, unique id, created_by, created_ts, json_data) " +
+                    "VALUES (CAST (? AS bigint), ?, ?". +
+                    ",TO_TIMESTAMP(?, 'YYYY-MM-DD\"T\"HH24:MI:SS\"z\"')," +
+                    "CAST (? AS JSONB))";
+            PGDbConnection dbConn = new PGDbConnection(PGCS_DBW);
+            LOGGER.info("Inserting Records in event_log Tables ");
+            try (Connection con2 = dbConn.getConnection();
+                 PreparedStatement pst = con2.prepareStatement(Insert_query)) {
+                pst.setString(1, Job ID);
+                pst.setString(2, UnqJobID);
+                pst.setString(3, "Blob_Listner");
+                pst.setString(4, eventTime.toString());
+                pst.setString(5, cdbout.toString());
+                pst.executeUpdate();
+            } catch (SQLException ex) {
+                context.getLogger().info("Failed to connect to the database or execute the query.");
+                context.getLogger().info(ex.getMessage());
+            } finally {
+                try {
+                    if (dbConn != null && !dbConn.getConnection().isClosed()) {
+                        dbConn.getConnection().close();
+                    }
+                } catch (SQLException e) {
+                    e.printStackTrace();
+                }
+            } catch(Exception e){
+                LOGGER.severe(e.getMessage());
+                e.printStackTrace();
+            }
+        }
+
+        /**
+         * Trigger job on databricks
+         *
+         * @param params      params
+         * @param messageJson message
+         * @return
+         * @throws Exception
+         */
+        private String triggerDBJob (Map < String, Object > params,
+                JSONObject messageJson)
+            throws Exception {
+            List<String> jarParams = (List<String>) params.getOrDefault("jar_params",
+                    new ArrayList<>());
+
+            // create a request object
+            HttpRequest request = DatabricksUtil.createPostRequest(
+                    DatabricksUtil.createJobRunNowURI(), new JSONObject(params));
+            LOGGER.info("Invoking databricks POST job using: " + new JSONObject(params));
+            HttpResponse<String> response = DatabricksUtil.getHttpClient(false)
+                    .send(request, HttpResponse.BodyHandlers.ofString());
+            LOGGER.info("Databricks Response::" + response);
+
+            // Create JSONObject from response.body()
+            JSONObject responseJson = new JSONObject(response.body());
+            if (responseJson.has("run_id")) {
+                LOGGER.info("Job Triggered on Databricks. Run ID: "
+                        + responseJson.get("run_id"));
+                LOGGER.info("Job Triggered on Databricks." + responseJson.toString());
+                return String.valueOf(responseJson.get("run_id"));
+            }
+            return "-1";
+        }
+
+        public static String parseBlbDir (String blobUrl){
+            try {
+                String BlobCont = GetContainerName(blobUrl);
+                String encodedUrl = URLEncoder.encode(blobUrl, "UTF-8");
+                //System.out.println(" encodedUrl :: "+encodedUrl);
+                StringBuilder stringBuilder = new StringBuilder();
+
+                URI blobURI = new URI(encodedUrl);
+                String[] pathSegments = blobURI.getPath().split("/");
+                for (String pathSegment : pathSegments) {
+
+                    if (!pathSegment.isEmpty() && !pathSegment.equals(abfs_prefix) && !pathSegment.equals(http_prefix) && !pathSegment.equals(BlobCont) && !EXTENSION_PATTERN.matcher(pathSegment).find()) {
+                        //// System.out.println(" pathSegment::" + pathSegment);
+                        StringEscapeUtils.unescapeJava(pathSegment);
+                        stringBuilder.append(pathSegment).append("/");
+                    }
+                }
+                if (stringBuilder.length() > 0) {
+                    stringBuilder.deleteCharAt(stringBuilder.length() - 1);
+
+                }
+                return stringBuilder.toString();
+            } catch (Exception e) {
+                System.out.println("Error Parsing parseBlobUrlDirectories" + e.getMessage());
+                return "";
+            }
+        }
+        public static String GetFileName (String blobUrl){
+            try {
+                // Split the blobUrl on the forward slash (/^) character.
+                String[] blobUrlParts = blobUrl.split("/");
+                String filename = blobUrlParts[blobUrlParts.length - 1];
+                return filename;
+            } catch (Exception e) {
+                System.out.println("Error getting the filename: " + e.getMessage());
+                return "";
+            }
+        }
+
+        public static String GetContainerName (String blobUrl){
+            try {
+                // Split the blobUrl on the forward slash (7) character.
+                String[] blobUrlParts = blobUrl.split("/");
+                String GetContainerName = "";
+                return "";
+                if (blobUrl.startsWith(abfs_prefix)) {
+                    GetContainerName = GetContainerName + blobUrlParts[1];
+                } else {
+
+                    GetContainerName = GetContainerName + blobUrlParts[3];
+                }
+                return GetContainerName;
+            } catch (Exception e) {
+                System.out.println("Error getting the Get Container Name: " + e.getMessage());
+                return "";
+            }
+        }
+
+        public static String GetAccountName (String blobUrl){
+            try {
+                // Split the blobUrl on the forward slash (7) character.
+                String[] blobUrlParts = blobUrl.split("/");
+                String[] blobAccount = blobUrlParts[2].split(".blob.core.windows.net");
+                String AccountName = blobAccount[0];
+                return AccountName;
+            } catch (Exception e) {
+                System.out.println("Error getting the Get Container Name: " + e.getMessage());
+                return "";
+            }
+        }
+
+        public static <T> T getValue(String json, String key) {
+            try {
+                return JsonPath.read(json, key);
+            } catch (PathNotFoundException e) {
+                return null;
+            }
+        }
+
+        public static Map<String, Object> getMap (String s,
+                String path) {
+            try {
+                return JsonPath.read(s, path);
+            } catch (PathNotFoundException e) {
+                return null;
+            }
+        }
+
+        public static Map<String, Object> transformJson (JSONObject input, JSONObject blob_data) {
+            Map<String, Object> output = new HashMap<>();
+            Map<String, Object> taskParams = new HashMap<>();
+
+            output.put("job_id", input.get("job_id"));
+
+            JSONArray tasksArray = input.getJSONObject("settings").getJSONArray("tasks");
+
+            for (int i = 0; i < tasksArray.length(); i++) {
+                JSONObject task = tasksArray.getJSONObject(i);
+                Map<String, Object> taskObj = new HashMap<>();
+
+                if (task.has("depends_on")) {
+                    List<String> dependsList = new ArrayList<>();
+                    JSONArray dependsOnArray = task.getJSONArray("depends_on");
+                    for (int j = 0; j < dependsOnArray.length(); j++) {
+                        dependsList.add(dependsOnArray.getJSONObject(j).getString("task_key"));
+                    }
+
+                    taskObj.put("dependencies", dependsList);
+
+                }
+
+                List<String> paramsList = new ArrayList<>();
+                JSONArray paramsArray = task.getJSONObject("spark_jar_task").getJSONArray("parameters");
+
+                for (int k = 0; k < paramsArray.length(); k++) {
+                    paramsList.add(paramsArray.getString(k));
+                }
+                String escapedEvents = StringEscapeUtils.escapeJson(blob_data.toString())
+                paramsList.add("eventPayload=\"" + escapedEvents + "\"");
+
+                taskobj.put("jar_params", paramsList);
+
+                taskParams.put(task.getString("task_key"), taskobj);
+            }
+            output.put("task params", taskParams);
+            return output;
+        }
+    }
