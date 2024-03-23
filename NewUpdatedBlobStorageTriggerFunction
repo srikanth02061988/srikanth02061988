@@ -1,0 +1,323 @@
+package com.statestr.eff.spark.client;
+
+import com.jayway.jsonpath.JsonPath;
+import com.jayway.jsonpath.PathNotFoundException;
+//import com.microsoft.azure.functions.ExecutionContext;
+//import com.microsoft.azure.functions.annotation.BindingName;
+//import com.microsoft.azure.functions.annotation.BlobTrigger;
+//import com.microsoft.azure.functions.annotation.FunctionName;
+//import com.microsoft.azure.functions.annotation.StorageAccount;
+import org.apache.commons.lang3.StringEscapeUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.json.JSONArray;
+import org.json.JSONObject;
+import java.net.URI;
+import java.net.URLEncoder;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.sql.*;
+import java.text.SimpleDateFormat;
+import java.time.OffsetDateTime;
+import java.util.Date;
+import java.util.*;
+import java.util.logging.ConsoleHandler;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+import java.util.regex.Pattern;
+import com.microsoft.azure.functions.ExecutionContext;
+import com.microsoft.azure.functions.annotation.*;
+import com.microsoft.azure.storage.CloudStorageAccount;
+import com.microsoft.azure.storage.blob.CloudBlobClient;
+import com.microsoft.azure.storage.blob.CloudBlockBlob;
+import com.statestr.eff.util.DatabricksUtil;
+import com.statestr.eff.util.PGDbConnection;
+import org.apache.commons.lang3.StringEscapeUtils;
+import org.apache.commons.lang3.StringUtils;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+
+import java.sql.SQLException;
+
+public class BlobStorageTriggerFunction {
+
+    private static final Logger LOGGER = Logger.getLogger(BlobStorageTriggerFunction.class.getName());
+    private static final Pattern EXTENSION_PATTERN = Pattern.compile("\\.[^/]+$");
+
+    private static final String http_prefix = "https:";
+    private static final String abfs_prefix = "abfs:";
+
+    private static final String containerName = System.getenv("AZURE_STORAGE_CONTAINER");
+    private static final String AzureWJStorage = System.getenv("AzureWebJobsStorage");
+
+    static {
+        ConsoleHandler handler = new ConsoleHandler();
+        LOGGER.addHandler(handler);
+        LOGGER.setLevel(Level.INFO);
+        LOGGER.setUseParentHandlers(false);
+    }
+
+    @FunctionName("BlobStorageTriggerFunction-EFF")
+    @StorageAccount("AzureWebJobsStorage")
+    public void run(
+            @BlobTrigger(name = "blob", path = "$AZURE_STORAGE_CONTAINER%/{blobname}", connection = "AzureWebJobsStorage") String blob,
+            @BindingName("blobname") String filepath,
+            final ExecutionContext context
+    ) {
+        if (StringUtils.isEmpty(filepath)) {
+            LOGGER.severe("Empty Payload");
+            return;
+        }
+
+        try {
+            String storageAccountName;
+            CloudStorageAccount storageAccount = CloudStorageAccount.parse(AzureWJStorage);
+            storageAccountName = storageAccount.getCredentials().getAccountName();
+            CloudBlobClient blobClient = storageAccount.createCloudBlobClient();
+            CloudBlockBlob blockBlob = blobClient.getContainerReference(containerName).getBlockBlobReference(filepath);
+            blockBlob.downloadAttributes();
+            Date lastModified = blockBlob.getProperties().getLastModified();
+            String dateString = "";
+            if (lastModified != null) {
+                SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'");
+                sdf.setTimeZone(TimeZone.getTimeZone("UTC"));
+                dateString = sdf.format(lastModified);
+                if (lastModified.before(new Date(System.currentTimeMillis() - 120000))) {
+                    LOGGER.info("Skipping blob: " + filepath + ":---: lastModified: " + lastModified.toString());
+                    return;
+                }
+            } else {
+                LOGGER.warning("Could not get lastModified: " + filepath);
+            }
+
+            String eventTime = StringUtils.isEmpty(dateString) ? OffsetDateTime.now().toString() : dateString;
+
+            String blobUrl = String.format("https://%s.blob.core.windows.net/%s/%s", storageAccountName, containerName, filepath);
+            String eventType = "Blob Created";
+            String dirs = parseBlobDir(blobUrl);
+            String fileName = getFileName(blobUrl);
+            String evtName = "FeedInProgress-" + fileName;
+            String eventKey = blobUrl;
+
+            JSONObject blobDetailsJson = new JSONObject();
+            JSONObject data = new JSONObject();
+            data.put("eventType", eventType);
+            data.put("blobContainer", containerName);
+            data.put("blobDirectories", dirs);
+            data.put("filepath", filepath);
+            data.put("fileName", fileName);
+            data.put("eventKey", eventKey);
+            data.put("eventTime", eventTime);
+            blobDetailsJson.put("partKey", evtName + "-" + eventTime);
+            blobDetailsJson.put("data", data);
+
+            LOGGER.info("Blob Event data: " + blobDetailsJson.toString());
+
+            // Get PG Connection Scripts
+            String PGCS_DBW = System.getenv("EFF_PGSQL_SA_CS");
+            String appCode = "sow";
+            String query = "select json_data::text as json, uniqueid, jobid from " + appCode + "_metadata.workflow_jobinfo where json_data::text LIKE ? order by id desc limit 1";
+            try (Connection con = PGDbConnection.getConnection(PGCS_DBW);
+                 PreparedStatement pst = con.prepareStatement(query)) {
+                pst.setString(1, "%" + dirs + "%");
+                ResultSet rs = pst.executeQuery();
+                while (rs.next()) {
+                    String json = rs.getString("json");
+                    String uniqueId = rs.getString("uniqueid");
+                    String jobId = rs.getString("jobid");
+                    if (StringUtils.isEmpty(jobId)) {
+                        jobId = "999999999";
+                        uniqueId = "zzzzzzzzzz";
+                        LOGGER.info("Skipping blob for:" + filepath + ":--:" + json + ":: UID :---:" + uniqueId + ":--:JID:--:" + jobId);
+                        return;
+                    }
+                    LOGGER.info("Query eventMapping Details:--:" + json + ":---: UID :---:" + uniqueId + ":---: JID :---:" + jobId);
+                    blobDetailsJson.put("job_id", jobId);
+
+                    String blobPath = JsonPath.read(json, "blob_path");
+                    String jobName = JsonPath.read(json, "jobname");
+
+                    if (dirs.equalsIgnoreCase(parseBlobDir(blobPath))) {
+                        LOGGER.info("Triggering Databricks Job inside ::  " + uniqueId + ":-:" + dirs + ":-:" + evtName);
+
+                        Map<String, Object> databricks = JsonPath.read(json, "databricks");
+                        String runId = triggerDBJob(databricks, blobDetailsJson);
+                        blobDetailsJson.put("job_run_id", runId);
+                        blobDetailsJson.put("job_name", jobName);
+                    }
+                }
+            } catch (SQLException ex) {
+                LOGGER.log(Level.SEVERE, "Failed to connect to the database or execute the query.", ex);
+            }
+
+            String cdbOut = blobDetailsJson.toString();
+
+            String insertQuery = "INSERT INTO datafabric_logging.event_log (jobid, unique_id, created_by, created_ts, json_data) " +
+                    "VALUES (CAST (? AS bigint), ?, ?, TO_TIMESTAMP(?, 'YYYY-MM-DD\"T\"HH24:MI:SS\"z\"'), CAST (? AS JSONB))";
+            try (Connection con2 = PGDbConnection.getConnection(PGCS_DBW);
+                 PreparedStatement pst = con2.prepareStatement(insertQuery)) {
+                pst.setString(1, jobId);
+                pst.setString(2, uniqueId);
+                pst.setString(3, "Blob_Listner");
+                pst.setString(4, eventTime);
+                pst.setString(5, cdbOut);
+                pst.executeUpdate();
+            } catch (SQLException ex) {
+                LOGGER.log(Level.SEVERE, "Failed to connect to the database or execute the query.", ex);
+            }
+        } catch (Exception e) {
+            LOGGER.severe(e.getMessage());
+            e.printStackTrace();
+        }
+    }
+    private static String parseBlobDir(String blobUrl) {
+        try {
+            String BlobCont = getContainerName(blobUrl);
+            String encodedUrl = URLEncoder.encode(blobUrl, "UTF-8");
+            StringBuilder stringBuilder = new StringBuilder();
+
+            URI blobURI = new URI(encodedUrl);
+            String[] pathSegments = blobURI.getPath().split("/");
+            for (String pathSegment : pathSegments) {
+                if (!pathSegment.isEmpty() && !pathSegment.equals(abfs_prefix) && !pathSegment.equals(http_prefix) && !pathSegment.equals(BlobCont) && !EXTENSION_PATTERN.matcher(pathSegment).find()) {
+                    StringEscapeUtils.unescapeJava(pathSegment);
+                    stringBuilder.append(pathSegment).append("/");
+                }
+            }
+            if (stringBuilder.length() > 0) {
+                stringBuilder.deleteCharAt(stringBuilder.length() - 1);
+            }
+            return stringBuilder.toString();
+        } catch (Exception e) {
+            LOGGER.severe("Error Parsing parseBlobUrlDirectories" + e.getMessage());
+            return "";
+        }
+    }
+
+    private static String getFileName(String blobUrl) {
+        try {
+            String[] blobUrlParts = blobUrl.split("/");
+            return blobUrlParts[blobUrlParts.length - 1];
+        } catch (Exception e) {
+            LOGGER.severe("Error getting the filename: " + e.getMessage());
+            return "";
+        }
+    }
+
+    private static String getContainerName(String blobUrl) {
+        try {
+            String[] blobUrlParts = blobUrl.split("/");
+            String getContainerName = "";
+            if (blobUrl.startsWith(abfs_prefix)) {
+                getContainerName = getContainerName + blobUrlParts[1];
+            } else {
+                getContainerName = getContainerName + blobUrlParts[3];
+            }
+            return getContainerName;
+        } catch (Exception e) {
+            LOGGER.severe("Error getting the Get Container Name: " + e.getMessage());
+            return "";
+        }
+    }
+
+    private static String getAccountName(String blobUrl) {
+        try {
+            String[] blobUrlParts = blobUrl.split("/");
+            String[] blobAccount = blobUrlParts[2].split(".blob.core.windows.net");
+            return blobAccount[0];
+        } catch (Exception e) {
+            LOGGER.severe("Error getting the Get Container Name: " + e.getMessage());
+            return "";
+        }
+    }
+
+    public static <T> T getValue(String json, String key) {
+        try {
+            return JsonPath.read(json, key);
+        } catch (PathNotFoundException e) {
+            return null;
+        }
+    }
+
+    public static Map<String, Object> getMap(String s, String path) {
+        try {
+            return JsonPath.read(s, path);
+        } catch (PathNotFoundException e) {
+            return null;
+        }
+    }
+
+    public static Map<String, Object> transformJson(JSONObject input, JSONObject blob_data) {
+        Map<String, Object> output = new HashMap<>();
+        Map<String, Object> taskParams = new HashMap<>();
+
+        output.put("job_id", input.get("job_id"));
+
+        JSONArray tasksArray = input.getJSONObject("settings").getJSONArray("tasks");
+
+        for (int i = 0; i < tasksArray.length(); i++) {
+            JSONObject task = tasksArray.getJSONObject(i);
+            Map<String, Object> taskObj = new HashMap<>();
+
+            if (task.has("depends_on")) {
+                List<String> dependsList = new ArrayList<>();
+                JSONArray dependsOnArray = task.getJSONArray("depends_on");
+                for (int j = 0; j < dependsOnArray.length(); j++) {
+                    dependsList.add(dependsOnArray.getJSONObject(j).getString("task_key"));
+                }
+
+                taskObj.put("dependencies", dependsList);
+            }
+
+            List<String> paramsList = new ArrayList<>();
+            JSONArray paramsArray = task.getJSONObject("spark_jar_task").getJSONArray("parameters");
+
+            for (int k = 0; k < paramsArray.length(); k++) {
+                paramsList.add(paramsArray.getString(k));
+            }
+            String escapedEvents = StringEscapeUtils.escapeJson(blob_data.toString());
+            paramsList.add("eventPayload=\"" + escapedEvents + "\"");
+
+            taskObj.put("jar_params", paramsList);
+
+            taskParams.put(task.getString("task_key"), taskObj);
+        }
+        output.put("task params", taskParams);
+        return output;
+    }
+
+    private static String triggerDBJob(Map<String, Object> params, JSONObject messageJson) throws Exception {
+        List<String> jarParams = (List<String>) params.getOrDefault("jar_params", new ArrayList<>());
+
+        // create a request object
+        HttpRequest request = DatabricksUtil.createPostRequest(
+                DatabricksUtil.createJobRunNowURI(), new JSONObject(params));
+        LOGGER.info("Invoking databricks POST job using: " + new JSONObject(params));
+        HttpResponse<String> response = DatabricksUtil.getHttpClient(false)
+                .send(request, HttpResponse.BodyHandlers.ofString());
+        LOGGER.info("Databricks Response::" + response);
+
+        // Create JSONObject from response.body()
+        JSONObject responseJson = new JSONObject(response.body());
+        if (responseJson.has("run_id")) {
+            LOGGER.info("Job Triggered on Databricks. Run ID: " + responseJson.get("run_id"));
+            LOGGER.info("Job Triggered on Databricks." + responseJson.toString());
+            return String.valueOf(responseJson.get("run_id"));
+        }
+        return "-1";
+    }
+
+    public static class PGDbConnection {
+        private String connectionString;
+
+        public PGDbConnection(String connectionString) {
+            this.connectionString = connectionString;
+        }
+
+        public Connection getConnection() throws SQLException {
+            return DriverManager.getConnection(connectionString);
+        }
+    }
+
+}
