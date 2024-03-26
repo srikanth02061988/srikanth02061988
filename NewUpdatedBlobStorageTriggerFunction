@@ -33,7 +33,7 @@ import com.statestr.eff.util.DatabricksUtil;
 import com.statestr.eff.util.PGDbConnection;
 import org.apache.commons.lang3.StringEscapeUtils;
 import org.apache.commons.lang3.StringUtils;
-
+import java.net.http.HttpRequest;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -115,17 +115,20 @@ public class BlobStorageTriggerFunction {
             LOGGER.info("Blob Event data: " + blobDetailsJson.toString());
 
             // Get PG Connection Scripts
+            String uniqueId = null;
+            String jobId = null;
             String PGCS_DBW = System.getenv("EFF_PGSQL_SA_CS");
             String appCode = "sow";
             String query = "select json_data::text as json, uniqueid, jobid from " + appCode + "_metadata.workflow_jobinfo where json_data::text LIKE ? order by id desc limit 1";
-            try (Connection con = PGDbConnection.getConnection(PGCS_DBW);
+            PGDbConnection dbConnection = new PGDbConnection(PGCS_DBW);
+            try (Connection con = dbConnection.getConnection();
                  PreparedStatement pst = con.prepareStatement(query)) {
                 pst.setString(1, "%" + dirs + "%");
                 ResultSet rs = pst.executeQuery();
                 while (rs.next()) {
                     String json = rs.getString("json");
-                    String uniqueId = rs.getString("uniqueid");
-                    String jobId = rs.getString("jobid");
+                    uniqueId = rs.getString("uniqueid");
+                    jobId = rs.getString("jobid");
                     if (StringUtils.isEmpty(jobId)) {
                         jobId = "999999999";
                         uniqueId = "zzzzzzzzzz";
@@ -155,7 +158,7 @@ public class BlobStorageTriggerFunction {
 
             String insertQuery = "INSERT INTO datafabric_logging.event_log (jobid, unique_id, created_by, created_ts, json_data) " +
                     "VALUES (CAST (? AS bigint), ?, ?, TO_TIMESTAMP(?, 'YYYY-MM-DD\"T\"HH24:MI:SS\"z\"'), CAST (? AS JSONB))";
-            try (Connection con2 = PGDbConnection.getConnection(PGCS_DBW);
+            try (Connection con2 = dbConnection.getConnection();
                  PreparedStatement pst = con2.prepareStatement(insertQuery)) {
                 pst.setString(1, jobId);
                 pst.setString(2, uniqueId);
